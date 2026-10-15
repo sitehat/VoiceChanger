@@ -112,7 +112,7 @@ class Previewer {
         playing = false
     }
 
-    fun play(raw: ShortArray, p: Preset, fine: Float, onDone: () -> Unit) {
+    fun play(raw: ShortArray, p: Preset, fine: Float, onReady: (() -> Unit)? = null, onDone: () -> Unit) {
         val myGen = ++gen
         playing = true
         val handler = Handler(Looper.getMainLooper())
@@ -142,6 +142,7 @@ class Previewer {
             try {
                 var rendered: ShortArray? = null
                 if (p.match) rendered = MatchOffline.render(raw, fine)
+                if (onReady != null && gen == myGen) handler.post { onReady() }
                 val src = rendered ?: raw
                 track.play()
                 var i = 0

@@ -66,6 +66,15 @@ class MainActivity : AppCompatActivity() {
         btnShare = findViewById(R.id.btnShare)
 
         TargetVoice.load(applicationContext)
+        val poll = object : Runnable {
+            var tries = 0
+            override fun run() {
+                tries++
+                if (raw == null && !recorder.recording) statusText.text = TargetVoice.status
+                if (!TargetVoice.ready && tries < 8) statusText.postDelayed(this, 1000)
+            }
+        }
+        statusText.postDelayed(poll, 800)
 
         Presets.ALL.forEachIndexed { i, p ->
             val rb = RadioButton(this)
@@ -261,7 +270,11 @@ class MainActivity : AppCompatActivity() {
         if (r.isEmpty()) return
         if (!targetOk()) return
         btnPlay.text = "⏹ Stop"
-        previewer.play(r, Presets.ALL[selected], fine()) { btnPlay.text = PLAY_TEXT }
+        val p = Presets.ALL[selected]
+        if (p.match) statusText.text = "Processing..."
+        previewer.play(r, p, fine(), { if (p.match) statusText.text = MatchOffline.lastInfo }) {
+            btnPlay.text = PLAY_TEXT
+        }
     }
 
     private fun saveWav(sel: Int, fineVal: Float): Uri? {

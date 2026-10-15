@@ -197,10 +197,10 @@ object Detect {
     private const val DSR = 11025f
 
     /** d = 512 samples at 11025 Hz. Returns F0 in Hz or 0 if unvoiced. */
-    fun f0(d: FloatArray): Float {
+    fun f0(d: FloatArray, gate: Float = 0.01f): Float {
         var e = 0f
         for (v in d) e += v * v
-        if (sqrt(e / d.size) < 0.01f) return 0f
+        if (sqrt(e / d.size) < gate) return 0f
         val minLag = 27
         val maxLag = 157
         val r = FloatArray(maxLag + 2)
@@ -399,6 +399,8 @@ class MatchProcessor(private val sr: Int, private val meanMode: Boolean = false)
 
 /** Best-quality path for recordings: whole-clip analysis, WSOLA pitch shift, fixed tone EQ. */
 object MatchOffline {
+    @Volatile var lastInfo = ""
+
     fun render(raw: ShortArray, fine: Float): ShortArray {
         val tp = TargetVoice.profile
         val tf = TargetVoice.f0
@@ -408,8 +410,14 @@ object MatchOffline {
         // Step 1: pitch: median over the WHOLE recording -> one fixed shift
         val med = Detect.medianF0(x)
         val semis = if (med > 0f) (12.0 * ln((tf / med).toDouble()) / ln(2.0)).coerceIn(-14.0, 14.0) else 0.0
-        val r = 2.0.pow((semis + fine) / 12.0)
-        val y = if (abs(r - 1.0) < 0.005) x.copyOf() else pitchShift(x, r)
+        val rTotal = 2.0.pow((semis + fine) / 12.0)
+        // split the change: part moves the voice-box tone (formants), the rest only moves pitch
+        val rho = rTotal.pow(0.35)
+        var y = x.copyOf()
+        if (abs(rho - 1.0) > 0.005) y = pitchShift(y, rho)
+        val rb = rTotal / rho
+        if (abs(rb - 1.0) > 0.005) y = psola(y, rb)
+        lastInfo = "Your pitch ${med.toInt()} Hz -> default voice ${tf.toInt()} Hz (shift ${"%.1f".format(semis)} semitones)"
 
         // Step 2: tone: compare average spectrum with the target voice, one fixed EQ
         var rms = 0.0
@@ -440,6 +448,85 @@ object MatchOffline {
         for (v in y) peak = max(peak, abs(v))
         val scale = if (peak > 1e-4f) min(0.89f / peak, 8f) else 1f
         return ShortArray(y.size) { AudioUtil.toShort(y[it] * scale) }
+    }
+
+    /** Pitch-synchronous overlap-add: changes pitch but keeps the speaker's tone (formants). */
+    private fun psola(x: FloatArray, r: Double): FloatArray {
+        val n = x.size
+        val sr = AudioUtil.SR
+        val dec = FloatArray(n / 4) { (x[it * 4] + x[it * 4 + 1] + x[it * 4 + 2] + x[it * 4 + 3]) / 4f }
+        val nf = max(1, (dec.size - 512) / 256 + 1)
+        val f0 = FloatArray(nf)
+        val frame = FloatArray(512)
+        for (j in 0 until nf) {
+            val s = j * 256
+            if (s + 512 > dec.size) break
+            System.arraycopy(dec, s, frame, 0, 512)
+            f0[j] = Detect.f0(frame, 0.003f)
+        }
+        for (j in 1 until nf - 1) {
+            val a = f0[j - 1]; val b = f0[j]; val c = f0[j + 1]
+            if (a > 0f && b > 0f && c > 0f) {
+                val med = max(min(a, b), min(max(a, b), c))
+                if (abs(b - med) / med > 0.2f) f0[j] = med
+            }
+        }
+        fun f0At(p: Int): Float = f0[((p - 1024) / 1024.0).roundToInt().coerceIn(0, nf - 1)]
+
+        // pitch marks
+        val marks = ArrayList<Int>()
+        val per = ArrayList<Int>()
+        val voiced = ArrayList<Boolean>()
+        var m = 0
+        var prevVoiced = false
+        while (m < n) {
+            val f = f0At(m)
+            if (f > 0f) {
+                val t = (sr / f).toInt().coerceIn(100, 650)
+                if (!prevVoiced) {
+                    var bm = m
+                    var bv = -1e9f
+                    for (i in m until min(n, m + t)) if (x[i] > bv) { bv = x[i]; bm = i }
+                    m = bm
+                }
+                marks.add(m); per.add(t); voiced.add(true)
+                prevVoiced = true
+                val lo = m + (0.7 * t).toInt()
+                if (lo >= n) break
+                val hi = min(n - 1, m + (1.3 * t).toInt())
+                var bm = lo
+                var bv = -1e9f
+                for (i in lo..hi) if (x[i] > bv) { bv = x[i]; bm = i }
+                m = bm
+            } else {
+                marks.add(m); per.add(220); voiced.add(false)
+                prevVoiced = false
+                m += 220
+            }
+        }
+
+        // overlap-add with new spacing
+        val y = FloatArray(n)
+        val cnt = marks.size
+        var t = 0.0
+        var k = 0
+        while (t < n && cnt > 0) {
+            while (k + 1 < cnt && abs(marks[k + 1] - t) <= abs(marks[k] - t)) k++
+            val mk = marks[k]
+            val len = per[k]
+            val v = voiced[k]
+            val g = if (v) (1.0 / r).toFloat() else 1f
+            val c = t.toInt()
+            for (i in -len..len) {
+                val s = mk + i
+                val d = c + i
+                if (s < 0 || s >= n || d < 0 || d >= n) continue
+                val w = (0.5 + 0.5 * cos(PI * i / len)).toFloat()
+                y[d] += x[s] * w * g
+            }
+            t += if (v) len / r else len.toDouble()
+        }
+        return y
     }
 
     private fun pitchShift(x: FloatArray, r: Double): FloatArray {
