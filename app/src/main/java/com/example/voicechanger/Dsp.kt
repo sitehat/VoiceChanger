@@ -43,9 +43,12 @@ class PitchShifter(sampleRate: Int) {
 
 /** RBJ biquad shelving filter. */
 class Biquad private constructor(
-    private val b0: Float, private val b1: Float, private val b2: Float,
-    private val a1: Float, private val a2: Float
+    private var b0: Float, private var b1: Float, private var b2: Float,
+    private var a1: Float, private var a2: Float
 ) {
+    /** Change coefficients but keep filter memory (no clicks). */
+    fun update(o: Biquad) { b0 = o.b0; b1 = o.b1; b2 = o.b2; a1 = o.a1; a2 = o.a2 }
+
     private var z1 = 0f
     private var z2 = 0f
 
@@ -72,6 +75,18 @@ class Biquad private constructor(
             return Biquad(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
         }
 
+        fun peaking(fs: Int, f0: Float, q: Float, gainDb: Float): Biquad {
+            val a = 10.0.pow(gainDb / 40.0).toFloat()
+            val w0 = (2 * PI * f0 / fs).toFloat()
+            val c = cos(w0); val alpha = sin(w0) / (2f * q)
+            val b0 = 1 + alpha * a
+            val b1 = -2 * c
+            val b2 = 1 - alpha * a
+            val a0 = 1 + alpha / a
+            val a2 = 1 - alpha / a
+            return Biquad(b0 / a0, b1 / a0, b2 / a0, b1 / a0, a2 / a0)
+        }
+
         fun highShelf(fs: Int, f0: Float, gainDb: Float): Biquad {
             val a = 10.0.pow(gainDb / 40.0).toFloat()
             val w0 = (2 * PI * f0 / fs).toFloat()
@@ -95,6 +110,8 @@ class VoiceProcessor(private val sr: Int) {
     private var cur: Preset? = null
     private var bass: Biquad? = null
     private var treble: Biquad? = null
+    private var presence: Biquad? = null
+    private var match: MatchProcessor? = null
     private var robot = false
     private var bypass = true
     private var robotPhase = 0.0
@@ -105,18 +122,30 @@ class VoiceProcessor(private val sr: Int) {
             cur = p
             bass = if (p.bassDb != 0f) Biquad.lowShelf(sr, 200f, p.bassDb) else null
             treble = if (p.trebleDb != 0f) Biquad.highShelf(sr, 4000f, p.trebleDb) else null
+            presence = if (p.presenceDb != 0f) Biquad.peaking(sr, 2800f, 0.8f, p.presenceDb) else null
             robot = p.robot
         }
-        bypass = (p.semitones == 0f && !p.robot && fine == 0f)
+        if (p.match) {
+            if (match == null) match = MatchProcessor(sr)
+            match?.setFine(fine)
+        }
+        bypass = !p.match && (p.semitones == 0f && !p.robot && fine == 0f)
         val semis = if (p.semitones == 0f && !p.robot) 0f else p.semitones + fine
         shifter.ratio = 2.0.pow(semis / 12.0).toFloat()
     }
 
+    /** For recordings: learn pitch/tone of the whole clip first (Default Voice only). */
+    fun prepare(raw: ShortArray) {
+        if (cur?.match == true) match = MatchProcessor.warmed(sr, raw)
+    }
+
     fun process(input: Float): Float {
+        if (cur?.match == true) return match?.process(input) ?: input
         if (bypass) return input
         var x = shifter.process(input)
         bass?.let { x = it.process(x) }
         treble?.let { x = it.process(x) }
+        presence?.let { x = it.process(x) }
         if (robot) {
             x *= (0.5 + 0.5 * sin(robotPhase)).toFloat()
             robotPhase += robotStep

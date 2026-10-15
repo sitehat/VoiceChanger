@@ -65,6 +65,8 @@ class MainActivity : AppCompatActivity() {
         btnSave = findViewById(R.id.btnSave)
         btnShare = findViewById(R.id.btnShare)
 
+        TargetVoice.load(applicationContext)
+
         Presets.ALL.forEachIndexed { i, p ->
             val rb = RadioButton(this)
             rb.id = 1000 + i
@@ -76,7 +78,7 @@ class MainActivity : AppCompatActivity() {
 
         group.setOnCheckedChangeListener { _, id ->
             selected = id - 1000
-            if (sw.isChecked) sendStart() else autoPreview()
+            if (targetOk()) { if (sw.isChecked) sendStart() else autoPreview() }
         }
 
         seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -92,6 +94,7 @@ class MainActivity : AppCompatActivity() {
         sw.setOnCheckedChangeListener { _, on ->
             if (updating) return@setOnCheckedChangeListener
             if (on) {
+                if (!targetOk()) { setSwitch(false); return@setOnCheckedChangeListener }
                 if (recorder.recording) stopRecording()
                 previewer.stop(); btnPlay.text = PLAY_TEXT
                 if (hasMic()) startVoice() else requestPerms()
@@ -155,7 +158,13 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- helpers ----------
 
-    private fun fine(): Float = (seek.progress - 12) * 0.5f
+    private fun targetOk(): Boolean {
+        if (!Presets.ALL[selected].match || TargetVoice.ready) return true
+        toast(TargetVoice.status)
+        return false
+    }
+
+    private fun fine(): Float = (seek.progress - 24) * 0.5f
 
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_LONG).show()
 
@@ -232,12 +241,14 @@ class MainActivity : AppCompatActivity() {
     private fun playPreview() {
         val r = raw ?: return
         if (r.isEmpty()) return
+        if (!targetOk()) return
         btnPlay.text = "⏹ Stop"
         previewer.play(r, Presets.ALL[selected], fine()) { btnPlay.text = PLAY_TEXT }
     }
 
     private fun saveWav(): Uri? {
         val r = raw ?: return null
+        if (!targetOk()) return null
         val p = Presets.ALL[selected]
         val pcm = AudioUtil.render(r, p, fine())
         val name = "Voice_${p.name.replace(Regex("[^A-Za-z]"), "")}_${System.currentTimeMillis()}.wav"

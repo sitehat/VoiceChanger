@@ -22,6 +22,7 @@ object AudioUtil {
     fun render(raw: ShortArray, p: Preset, fine: Float): ShortArray {
         val proc = VoiceProcessor(SR)
         proc.configure(p, fine)
+        proc.prepare(raw)
         val out = ShortArray(raw.size)
         for (i in raw.indices) out[i] = toShort(proc.process(raw[i] / 32768f))
         return out
@@ -137,6 +138,7 @@ class Previewer {
                 .build()
             val proc = VoiceProcessor(sr)
             proc.configure(p, fine)
+            proc.prepare(raw)
             val chunk = ShortArray(1024)
             try {
                 track.play()
