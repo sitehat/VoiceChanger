@@ -2,6 +2,10 @@
 
 Open the app -> ON/OFF switch -> pick Male / Female / Child / Robot voice -> speak. Use headphones.
 
+## Record & Save (v1.1)
+Tap Record -> speak -> Stop. Then tap any voice to hear it, press Save WAV (goes to Music/VoiceChanger) or Share.
+The raw recording is kept, so you can try every voice on the same recording.
+
 ## Build the APK with GitHub
 1. Create a new GitHub repository and upload ALL files from this zip (keep the `.github` folder).
 2. Open the **Actions** tab -> **Build APK** -> wait for the green tick (or press *Run workflow*).
