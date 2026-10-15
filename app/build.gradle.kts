@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.voicechanger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 4
+        versionName = "1.3"
     }
     buildTypes {
         release { isMinifyEnabled = false }
@@ -22,6 +22,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    androidResources { noCompress += "mp3" }
 }
 
 dependencies {
