@@ -5,11 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
-import kotlin.math.PI
 import kotlin.math.max
-import kotlin.math.pow
-import kotlin.math.sin
-import kotlin.math.tanh
 
 class VoiceEngine {
     @Volatile var preset: Preset = Presets.ALL[0]
@@ -33,7 +29,7 @@ class VoiceEngine {
     }
 
     private fun loop() {
-        val sr = 44100
+        val sr = AudioUtil.SR
         val frame = 512
         val minIn = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val minOut = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -65,13 +61,7 @@ class VoiceEngine {
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
 
-        val shifter = PitchShifter(sr)
-        var currentPreset: Preset? = null
-        var bass: Biquad? = null
-        var treble: Biquad? = null
-        var robotPhase = 0.0
-        val robotStep = 2 * PI * 50.0 / sr
-
+        val proc = VoiceProcessor(sr)
         val inBuf = ShortArray(frame)
         val outBuf = ShortArray(frame)
 
@@ -81,31 +71,9 @@ class VoiceEngine {
             while (running) {
                 val n = rec.read(inBuf, 0, frame)
                 if (n <= 0) continue
-
-                val p = preset
-                if (p !== currentPreset) {
-                    currentPreset = p
-                    bass = if (p.bassDb != 0f) Biquad.lowShelf(sr, 200f, p.bassDb) else null
-                    treble = if (p.trebleDb != 0f) Biquad.highShelf(sr, 4000f, p.trebleDb) else null
-                }
-                val semis = if (p.semitones == 0f && !p.robot) 0f else p.semitones + fineTune
-                shifter.ratio = 2.0.pow(semis / 12.0).toFloat()
-                val bypass = (p.semitones == 0f && !p.robot && fineTune == 0f)
-
+                proc.configure(preset, fineTune)
                 for (i in 0 until n) {
-                    var x = inBuf[i] / 32768f
-                    if (!bypass) {
-                        x = shifter.process(x)
-                        bass?.let { x = it.process(x) }
-                        treble?.let { x = it.process(x) }
-                        if (p.robot) {
-                            x *= (0.5 + 0.5 * sin(robotPhase)).toFloat()
-                            robotPhase += robotStep
-                            if (robotPhase > 2 * PI) robotPhase -= 2 * PI
-                        }
-                        x = tanh(x * 1.2f)
-                    }
-                    outBuf[i] = (x.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+                    outBuf[i] = AudioUtil.toShort(proc.process(inBuf[i] / 32768f))
                 }
                 track.write(outBuf, 0, n)
             }

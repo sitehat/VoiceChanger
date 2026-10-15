@@ -88,3 +88,40 @@ class Biquad private constructor(
         }
     }
 }
+
+/** Full voice chain: pitch shift + EQ + robot + soft clip. Used for live mode, preview and saving. */
+class VoiceProcessor(private val sr: Int) {
+    private val shifter = PitchShifter(sr)
+    private var cur: Preset? = null
+    private var bass: Biquad? = null
+    private var treble: Biquad? = null
+    private var robot = false
+    private var bypass = true
+    private var robotPhase = 0.0
+    private val robotStep = 2 * PI * 50.0 / sr
+
+    fun configure(p: Preset, fine: Float) {
+        if (p !== cur) {
+            cur = p
+            bass = if (p.bassDb != 0f) Biquad.lowShelf(sr, 200f, p.bassDb) else null
+            treble = if (p.trebleDb != 0f) Biquad.highShelf(sr, 4000f, p.trebleDb) else null
+            robot = p.robot
+        }
+        bypass = (p.semitones == 0f && !p.robot && fine == 0f)
+        val semis = if (p.semitones == 0f && !p.robot) 0f else p.semitones + fine
+        shifter.ratio = 2.0.pow(semis / 12.0).toFloat()
+    }
+
+    fun process(input: Float): Float {
+        if (bypass) return input
+        var x = shifter.process(input)
+        bass?.let { x = it.process(x) }
+        treble?.let { x = it.process(x) }
+        if (robot) {
+            x *= (0.5 + 0.5 * sin(robotPhase)).toFloat()
+            robotPhase += robotStep
+            if (robotPhase > 2 * PI) robotPhase -= 2 * PI
+        }
+        return kotlin.math.tanh(x * 1.2f)
+    }
+}
