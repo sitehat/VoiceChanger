@@ -20,9 +20,9 @@ object AudioUtil {
 
     /** Apply the selected voice to a raw recording. */
     fun render(raw: ShortArray, p: Preset, fine: Float): ShortArray {
+        if (p.match) return MatchOffline.render(raw, fine)
         val proc = VoiceProcessor(SR)
         proc.configure(p, fine)
-        proc.prepare(raw)
         val out = ShortArray(raw.size)
         for (i in raw.indices) out[i] = toShort(proc.process(raw[i] / 32768f))
         return out
@@ -138,14 +138,19 @@ class Previewer {
                 .build()
             val proc = VoiceProcessor(sr)
             proc.configure(p, fine)
-            proc.prepare(raw)
             val chunk = ShortArray(1024)
             try {
+                var rendered: ShortArray? = null
+                if (p.match) rendered = MatchOffline.render(raw, fine)
+                val src = rendered ?: raw
                 track.play()
                 var i = 0
-                while (gen == myGen && i < raw.size) {
-                    val n = min(chunk.size, raw.size - i)
-                    for (k in 0 until n) chunk[k] = AudioUtil.toShort(proc.process(raw[i + k] / 32768f))
+                while (gen == myGen && i < src.size) {
+                    val n = min(chunk.size, src.size - i)
+                    for (k in 0 until n) {
+                        chunk[k] = if (rendered != null) src[i + k]
+                        else AudioUtil.toShort(proc.process(src[i + k] / 32768f))
+                    }
                     track.write(chunk, 0, n)
                     i += n
                 }

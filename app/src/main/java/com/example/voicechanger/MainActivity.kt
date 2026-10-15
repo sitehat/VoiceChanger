@@ -124,23 +124,41 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnSave.setOnClickListener {
-            val uri = saveWav()
-            if (uri != null) toast("Saved in Music/VoiceChanger") else toast("Save failed")
+            if (!targetOk()) return@setOnClickListener
+            val sel = selected
+            val fv = fine()
+            statusText.text = "Processing and saving..."
+            Thread {
+                val uri = saveWav(sel, fv)
+                runOnUiThread {
+                    statusText.text = "Done."
+                    toast(if (uri != null) "Saved in Music/VoiceChanger" else "Save failed")
+                }
+            }.start()
         }
 
         btnShare.setOnClickListener {
-            val uri = saveWav()
-            if (uri == null) {
-                toast("Save failed")
-            } else if (Build.VERSION.SDK_INT >= 29) {
-                val send = Intent(Intent.ACTION_SEND)
-                    .setType("audio/wav")
-                    .putExtra(Intent.EXTRA_STREAM, uri)
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                startActivity(Intent.createChooser(send, "Share voice"))
-            } else {
-                toast("Saved: $uri")
-            }
+            if (!targetOk()) return@setOnClickListener
+            val sel = selected
+            val fv = fine()
+            statusText.text = "Processing..."
+            Thread {
+                val uri = saveWav(sel, fv)
+                runOnUiThread {
+                    statusText.text = "Done."
+                    if (uri == null) {
+                        toast("Save failed")
+                    } else if (Build.VERSION.SDK_INT >= 29) {
+                        val send = Intent(Intent.ACTION_SEND)
+                            .setType("audio/wav")
+                            .putExtra(Intent.EXTRA_STREAM, uri)
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        startActivity(Intent.createChooser(send, "Share voice"))
+                    } else {
+                        toast("Saved: $uri")
+                    }
+                }
+            }.start()
         }
     }
 
@@ -246,11 +264,10 @@ class MainActivity : AppCompatActivity() {
         previewer.play(r, Presets.ALL[selected], fine()) { btnPlay.text = PLAY_TEXT }
     }
 
-    private fun saveWav(): Uri? {
+    private fun saveWav(sel: Int, fineVal: Float): Uri? {
         val r = raw ?: return null
-        if (!targetOk()) return null
-        val p = Presets.ALL[selected]
-        val pcm = AudioUtil.render(r, p, fine())
+        val p = Presets.ALL[sel]
+        val pcm = AudioUtil.render(r, p, fineVal)
         val name = "Voice_${p.name.replace(Regex("[^A-Za-z]"), "")}_${System.currentTimeMillis()}.wav"
         return try {
             if (Build.VERSION.SDK_INT >= 29) {

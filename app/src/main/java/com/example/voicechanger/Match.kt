@@ -7,6 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import java.nio.ByteOrder
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.log10
@@ -202,20 +203,23 @@ object Detect {
         if (sqrt(e / d.size) < 0.01f) return 0f
         val minLag = 27
         val maxLag = 157
-        val r = FloatArray(maxLag + 1)
+        val r = FloatArray(maxLag + 2)
         var best = 0
         var bestR = 0f
-        for (lag in minLag..maxLag) {
+        for (lag in (minLag - 1)..(maxLag + 1)) {
             var s = 0f
             for (i in 0 until d.size - lag) s += d[i] * d[i + lag]
             val v = s / e
             r[lag] = v
-            if (v > bestR) { bestR = v; best = lag }
+            if (lag in minLag..maxLag && v > bestR) { bestR = v; best = lag }
         }
-        if (best == 0 || bestR < 0.4f) return 0f
+        if (best == 0 || bestR < 0.5f) return 0f
         val half = best / 2
-        if (half >= minLag && r[half] > 0.85f * bestR) best = half
-        return DSR / best
+        if (half >= minLag && r[half] > 0.85f * bestR) return DSR / half
+        val a = r[best - 1]; val b = r[best]; val c = r[best + 1]
+        val den = a - 2f * b + c
+        val shift = if (den != 0f) (0.5f * (a - c) / den).coerceIn(-1f, 1f) else 0f
+        return DSR / (best + shift)
     }
 
     /** Median pitch of a whole signal (44100 Hz input). */
@@ -346,7 +350,7 @@ class MatchProcessor(private val sr: Int, private val meanMode: Boolean = false)
         val med = sorted[n / 2]
         val semis = (12.0 * ln((t / med).toDouble()) / ln(2.0)).coerceIn(-14.0, 14.0)
         val desired = 2.0.pow(semis / 12.0).toFloat()
-        if (!initialized) { ratio = desired; initialized = true } else ratio += 0.15f * (desired - ratio)
+        if (!initialized) { ratio = desired; initialized = true } else ratio += 0.05f * (desired - ratio)
     }
 
     private fun trackOutput(y: Float) {
@@ -357,13 +361,13 @@ class MatchProcessor(private val sr: Int, private val meanMode: Boolean = false)
         for (v in outBuf) e += v * v
         if (sqrt(e / 1024) < 0.01f) return
         val tp = TargetVoice.profile ?: return
-        ltas.add(outBuf, if (meanMode) 0f else 0.05f)
+        ltas.add(outBuf, if (meanMode) 0f else 0.03f)
         frames++
-        if (frames % 4 != 0) return
+        if (frames % 8 != 0) return
         val src = ltas.profileDb() ?: return
         for (i in 0 until Bands.N) {
-            val g = (tp[i] - src[i]).coerceIn(-9f, 9f)
-            gains[i] = 0.7f * gains[i] + 0.3f * g
+            val g = (tp[i] - src[i]).coerceIn(-6f, 6f)
+            gains[i] = 0.85f * gains[i] + 0.15f * g
             eq[i].update(Biquad.peaking(sr, Bands.center[i], 1.2f, gains[i]))
         }
     }
@@ -390,5 +394,107 @@ class MatchProcessor(private val sr: Int, private val meanMode: Boolean = false)
             m.freeze()
             return m
         }
+    }
+}
+
+/** Best-quality path for recordings: whole-clip analysis, WSOLA pitch shift, fixed tone EQ. */
+object MatchOffline {
+    fun render(raw: ShortArray, fine: Float): ShortArray {
+        val tp = TargetVoice.profile
+        val tf = TargetVoice.f0
+        if (tp == null || tf <= 0f || raw.size < 4096) return raw.copyOf()
+        val x = FloatArray(raw.size) { raw[it] / 32768f }
+
+        // Step 1: pitch: median over the WHOLE recording -> one fixed shift
+        val med = Detect.medianF0(x)
+        val semis = if (med > 0f) (12.0 * ln((tf / med).toDouble()) / ln(2.0)).coerceIn(-14.0, 14.0) else 0.0
+        val r = 2.0.pow((semis + fine) / 12.0)
+        val y = if (abs(r - 1.0) < 0.005) x.copyOf() else pitchShift(x, r)
+
+        // Step 2: tone: compare average spectrum with the target voice, one fixed EQ
+        var rms = 0.0
+        for (v in y) rms += v * v
+        val gate = max(0.005, 0.3 * sqrt(rms / y.size)).toFloat()
+        val ltas = Ltas()
+        val frame = FloatArray(1024)
+        var s = 0
+        while (s + 1024 <= y.size) {
+            System.arraycopy(y, s, frame, 0, 1024)
+            var e = 0f
+            for (v in frame) e += v * v
+            if (sqrt(e / 1024) > gate) ltas.add(frame, 0f)
+            s += 1024
+        }
+        val src = ltas.profileDb()
+        if (src != null) {
+            for (b in 0 until Bands.N) {
+                val g = (tp[b] - src[b]).coerceIn(-6f, 6f)
+                if (abs(g) < 0.3f) continue
+                val f = Biquad.peaking(AudioUtil.SR, Bands.center[b], 1.0f, g)
+                for (i in y.indices) y[i] = f.process(y[i])
+            }
+        }
+
+        // Step 3: level
+        var peak = 0f
+        for (v in y) peak = max(peak, abs(v))
+        val scale = if (peak > 1e-4f) min(0.89f / peak, 8f) else 1f
+        return ShortArray(y.size) { AudioUtil.toShort(y[it] * scale) }
+    }
+
+    private fun pitchShift(x: FloatArray, r: Double): FloatArray {
+        val st = wsola(x, r)
+        val out = FloatArray(x.size)
+        for (i in out.indices) {
+            val pos = i * r
+            val i0 = pos.toInt()
+            if (i0 + 1 >= st.size) break
+            val fr = (pos - i0).toFloat()
+            out[i] = st[i0] + (st[i0 + 1] - st[i0]) * fr
+        }
+        return out
+    }
+
+    /** Time-stretch by alpha without changing pitch. */
+    private fun wsola(x: FloatArray, alpha: Double): FloatArray {
+        val w = 1536
+        val hs = 768
+        val delta = 480
+        val outLen = (x.size * alpha).toInt()
+        val y = FloatArray(outLen + 2 * w)
+        val win = FloatArray(w) { (0.5 - 0.5 * cos(2.0 * PI * it / w)).toFloat() }
+        for (i in 0 until w) y[i] += x[i] * win[i]
+        var prev = 0
+        var k = 1
+        while (true) {
+            val outPos = k * hs
+            if (outPos >= outLen) break
+            val nominal = (outPos / alpha).toInt()
+            val target = prev + hs
+            val lo = max(0, nominal - delta)
+            val hi = min(x.size - w, nominal + delta)
+            if (hi < lo) break
+            var best = lo
+            var bestScore = -1e30f
+            var p = lo
+            while (p <= hi) {
+                var c = 0f
+                var e = 0f
+                var i = 0
+                while (i < hs) {
+                    val a = x[p + i]
+                    c += a * x[target + i]
+                    e += a * a
+                    i += 4
+                }
+                val score = c / sqrt(e + 1e-6f)
+                if (score > bestScore) { bestScore = score; best = p }
+                p++
+            }
+            for (i in 0 until w) y[outPos + i] += x[best + i] * win[i]
+            prev = best
+            k++
+        }
+        return y.copyOf(outLen)
     }
 }
